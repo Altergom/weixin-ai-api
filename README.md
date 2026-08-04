@@ -1,28 +1,61 @@
-# 微信 iLink 基础服务
+# 微信 iLink 连接库
 
-将 `openclaw-weixin` 使用的 iLink 协议抽离为可被其他程序调用的 HTTP 基础服务。服务不承载模型推理，只保存外接模型所需的连接配置，并负责微信二维码登录会话。
+提供微信 iLink 二维码登录 HTTP 接口，供其他 Go 项目作为依赖使用。本仓库不包含可执行入口、HTTP 监听、模型配置或模型推理。
 
-## 启动
+## 引用
 
 ```bash
-cd weixin-ilink-service
-go run ./cmd/server
+go get github.com/Altergom/weixin-ai-api
 ```
 
-可通过 `LISTEN_ADDR`、`ILINK_BASE_URL`、`ILINK_APP_ID`、`ILINK_CLIENT_VERSION` 配置监听地址和 iLink 请求头。
+从指定 `.env` 文件创建 `http.Handler`，再由宿主项目挂载：
+
+```go
+import (
+	"net/http"
+
+	ilink "github.com/Altergom/weixin-ai-api"
+)
+
+handler, err := ilink.NewHandlerFromEnv(".env")
+if err != nil {
+	return err
+}
+
+mux := http.NewServeMux()
+mux.Handle("/api/v1/wechat/", handler)
+```
+
+库只读取传入的 `.env` 文件，不读取系统环境变量。文件不存在时使用以下默认值；修改文件后需要由宿主重新创建 Handler，通常即重启宿主服务。
+
+```dotenv
+ILINK_BASE_URL=https://ilinkai.weixin.qq.com
+ILINK_APP_ID=bot
+ILINK_CLIENT_VERSION=1.0.0
+```
+
+真实 `.env` 已被 Git 忽略，可从 `.env.example` 创建。
 
 ## 接口
 
-设置模型（key 只保存在内存中）：
+### 创建二维码
 
-```bash
-curl -X PUT http://localhost:8080/api/v1/model \
-  -H 'content-type: application/json' \
-  -d '{"model":"deepseek-chat","baseurl":"https://api.deepseek.com","key":"sk-..."}'
+```http
+POST /api/v1/wechat/qrcode
 ```
 
-`GET /api/v1/model` 返回模型名、baseurl 和脱敏 key。
+响应包含 `session_id`、`qrcode`、`status` 和 `expires_at`。其中 `qrcode` 包含原始二维码值，以及上游提供时的 `qrcode_url` 或 `qrcode_image`。
 
-创建微信二维码：`POST /api/v1/wechat/qrcode`，返回 `session_id`、`qrcode`、`qrcode_url` 或 `qrcode_image`。轮询 `GET /api/v1/wechat/qrcode/status?session_id=...`，状态包括 `wait`、`scaned`、`confirmed`、`expired` 等 iLink 原始状态。
+### 查询连接状态
 
-所有错误响应统一为 `{ "error": "..." }`。服务不会记录请求体、模型 key、bot token 或二维码凭据。
+```http
+GET /api/v1/wechat/qrcode/status?session_id=<session_id>
+```
+
+状态包括 `wait`、`scaned`、`confirmed` 和 `expired`。确认连接后，`bot_token` 仅保存在 Handler 的内存会话中，不写入日志或 HTTP 响应。
+
+所有错误响应统一为：
+
+```json
+{"error":"message"}
+```
