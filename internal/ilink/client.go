@@ -3,182 +3,211 @@ package ilink
 import (
 	"bytes"
 	"context"
-	cryptorand "crypto/rand"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"math/rand"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"path"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Altergom/weixin-ai-api/internal/app"
 )
 
+const defaultRequestTimeout = 15 * time.Second
+
+// Client 是无状态的轻量 iLink HTTP 客户端。账号凭据按请求传入，
+// 持续保存在本地存储中。
 type Client struct {
-	baseURL, appID, channelVersion, clientVersion string
-	httpClient                                    *http.Client
+	baseURL       *url.URL
+	appID         string
+	clientVersion uint32
+	botAgent      string
+	httpClient    *http.Client
+	log           *slog.Logger
+	randomUIN     func() (string, error)
 }
 
-type QRCode struct {
-	Code  string `json:"qrcode"`
-	URL   string `json:"qrcode_url,omitempty"`
-	Image string `json:"qrcode_image,omitempty"`
+// APIError 刻意不包含原始响应正文，因为上游错误可能包含不适合记录日志的
+// 请求标识或其他数据。
+type APIError struct {
+	StatusCode int
+	Code       int
+	Message    string
 }
 
-type LoginStatus struct {
-	Status    string `json:"status"`
-	AccountID string `json:"account_id,omitempty"`
-	UserID    string `json:"user_id,omitempty"`
-	BotToken  string `json:"-"`
-	Error     string `json:"error,omitempty"`
+func (e *APIError) Error() string {
+	if e.Code != 0 {
+		return fmt.Sprintf("ilink API error: HTTP %d, code %d: %s", e.StatusCode, e.Code, e.Message)
+	}
+	return fmt.Sprintf("ilink API error: HTTP %d: %s", e.StatusCode, e.Message)
 }
 
-func NewClient(baseURL, appID, version string) *Client {
-	if strings.TrimSpace(baseURL) == "" {
-		baseURL = "https://ilinkai.weixin.qq.com"
+// NewClient 根据非敏感应用配置创建客户端。
+func NewClient(cfg app.ILinkConfig, httpClient *http.Client, logger *slog.Logger) (*Client, error) {
+	baseURL, err := url.Parse(cfg.BaseURL)
+	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
+		return nil, fmt.Errorf("invalid ilink base URL")
 	}
-	if appID == "" {
-		appID = "bot"
+	if strings.TrimSpace(cfg.AppID) == "" {
+		return nil, errors.New("ilink app ID is required")
 	}
-	if version == "" {
-		version = "1.0.0"
+	if cfg.ClientVersion == 0 {
+		return nil, errors.New("ilink client version is required")
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), appID: appID, channelVersion: version, clientVersion: versionHeader(version), httpClient: &http.Client{Timeout: 45 * time.Second}}
-}
-
-func (c *Client) QRCode(ctx context.Context) (*QRCode, error) {
-	data, err := c.request(ctx, http.MethodPost, "/ilink/bot/get_bot_qrcode?bot_type=3", "", map[string]any{"local_token_list": []string{}}, false)
-	if err != nil {
-		return nil, err
-	}
-	image := normalizeImage(stringValue(data, "qrcode_img_content", "qrcodeImage"))
-	qrURL := stringValue(data, "qrcode_url", "qrcodeUrl")
-	if qrURL == "" && (strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://")) {
-		qrURL, image = image, ""
-	}
-	return &QRCode{Code: stringValue(data, "qrcode"), URL: qrURL, Image: image}, nil
-}
-
-func (c *Client) QRCodeStatus(ctx context.Context, code string) (*LoginStatus, error) {
-	query := url.Values{"qrcode": []string{code}}
-	data, err := c.request(ctx, http.MethodGet, "/ilink/bot/get_qrcode_status?"+query.Encode(), "", nil, false)
-	if err != nil {
-		return nil, err
-	}
-	return &LoginStatus{Status: normalizeStatus(stringValue(data, "status")), AccountID: deepString(data, "account_id", "accountId", "bot_id", "botId"), UserID: deepString(data, "user_id", "userId", "ilink_user_id", "ilinkUserId"), BotToken: deepString(data, "bot_token", "botToken", "token"), Error: stringValue(data, "error", "errmsg", "message")}, nil
-}
-
-func (c *Client) request(ctx context.Context, method, path, token string, payload any, auth bool) (map[string]any, error) {
-	var body io.Reader
-	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return nil, err
+	if httpClient == nil {
+		timeout := cfg.RequestTimeout.Duration()
+		if timeout <= 0 {
+			timeout = defaultRequestTimeout
 		}
-		body = bytes.NewReader(b)
+		httpClient = &http.Client{Timeout: timeout}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &Client{
+		baseURL:       baseURL,
+		appID:         strings.TrimSpace(cfg.AppID),
+		clientVersion: cfg.ClientVersion,
+		botAgent:      strings.TrimSpace(cfg.BotAgent),
+		httpClient:    httpClient,
+		log:           logger,
+		randomUIN:     newRandomUIN,
+	}, nil
+}
+
+func endpointURL(baseURL *url.URL, endpoint string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("parse ilink endpoint: %w", err)
+	}
+	base := *baseURL
+	base.Path = path.Join(base.Path, parsed.Path)
+	base.RawQuery = parsed.RawQuery
+	return base.String(), nil
+}
+
+func (c *Client) newRequest(ctx context.Context, method, endpoint, token string, body any) (*http.Request, error) {
+	return c.newRequestAt(ctx, c.baseURL, method, endpoint, token, body)
+}
+
+func (c *Client) newRequestAt(ctx context.Context, baseURL *url.URL, method, endpoint, token string, body any) (*http.Request, error) {
+	urlString, err := endpointURL(baseURL, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	if payload != nil {
+
+	var payload io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("encode ilink request: %w", err)
+		}
+		payload = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, urlString, payload)
+	if err != nil {
+		return nil, fmt.Errorf("create ilink request: %w", err)
+	}
+	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("iLink-App-Id", c.appID)
-	req.Header.Set("iLink-App-ClientVersion", c.clientVersion)
-	if auth {
+	req.Header.Set("iLink-App-ClientVersion", strconv.FormatUint(uint64(c.clientVersion), 10))
+
+	if method != http.MethodGet {
+		uin, err := c.randomUIN()
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-WECHAT-UIN", uin)
+	}
+	if strings.TrimSpace(token) != "" {
 		req.Header.Set("AuthorizationType", "ilink_bot_token")
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-WECHAT-UIN", randomUIN())
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	}
+	return req, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, method, endpoint, token string, body, output any) error {
+	return c.doJSONAt(ctx, c.baseURL, method, endpoint, token, body, output)
+}
+
+func (c *Client) doJSONAt(ctx context.Context, baseURL *url.URL, method, endpoint, token string, body, output any) error {
+	req, err := c.newRequestAt(ctx, baseURL, method, endpoint, token, body)
+	if err != nil {
+		return err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("perform ilink request: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("read ilink response: %w", err)
 	}
-	var data map[string]any
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("decode ilink response: %w", err)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return newAPIError(resp.StatusCode, data)
 	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("ilink http %d: %s", resp.StatusCode, stringValue(data, "message", "msg", "error"))
+	if output == nil || len(data) == 0 {
+		return nil
 	}
-	if code, ok := data["ret"].(float64); ok && code != 0 {
-		return nil, fmt.Errorf("ilink business error %v: %s", code, stringValue(data, "errmsg", "message", "error"))
+	if err := json.Unmarshal(data, output); err != nil {
+		return fmt.Errorf("decode ilink response: %w", err)
 	}
-	if nested, ok := data["data"].(map[string]any); ok {
-		for k, v := range nested {
-			data[k] = v
-		}
-	}
-	return data, nil
+	return nil
 }
 
-func stringValue(m map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok && v != "" {
-			return v
-		}
+// resolveBaseURL 在 raw 为空时返回配置中的地址，否则返回登录后或 IDC 重定向
+// 得到的账号专属 baseurl。
+func (c *Client) resolveBaseURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return c.baseURL, nil
 	}
-	return ""
-}
-func deepString(v any, keys ...string) string {
-	if m, ok := v.(map[string]any); ok {
-		if s := stringValue(m, keys...); s != "" {
-			return s
-		}
-		for _, child := range m {
-			if s := deepString(child, keys...); s != "" {
-				return s
-			}
-		}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid ilink base URL %q", raw)
 	}
-	return ""
+	return parsed, nil
 }
-func normalizeStatus(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	if s == "" {
-		return "wait"
-	}
-	if s == "scanned" {
-		return "scaned"
-	}
-	return s
-}
-func normalizeImage(s string) string {
-	if s == "" || strings.HasPrefix(s, "data:image") || strings.HasPrefix(s, "http") {
-		return s
-	}
-	if strings.Contains(s, "<svg") {
-		return "data:image/svg+xml;charset=utf-8," + url.PathEscape(s)
-	}
-	return "data:image/png;base64," + strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
-			return -1
-		}
-		return r
-	}, s)
-}
-func randomUIN() string {
-	n := rand.New(rand.NewSource(time.Now().UnixNano())).Uint32()
-	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", n)))
-}
-func versionHeader(v string) string {
-	var a, b, d int
-	fmt.Sscanf(strings.TrimPrefix(v, "v"), "%d.%d.%d", &a, &b, &d)
-	return fmt.Sprintf("%d", ((a&255)<<16)|((b&255)<<8)|(d&255))
-}
-func clientID() string { return "weixin-ilink-service-" + randomID() }
 
-func randomID() string {
-	b := make([]byte, 16)
-	if _, err := cryptorand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+func (c *Client) baseInfo() map[string]string {
+	info := map[string]string{
+		"channel_version": strconv.FormatUint(uint64(c.clientVersion), 10),
 	}
-	return fmt.Sprintf("%x", b)
+	if c.botAgent != "" {
+		info["bot_agent"] = c.botAgent
+	}
+	return info
+}
+
+func newAPIError(statusCode int, data []byte) error {
+	var payload struct {
+		Code    int    `json:"errcode"`
+		Message string `json:"errmsg"`
+	}
+	_ = json.Unmarshal(data, &payload)
+	if payload.Message == "" {
+		payload.Message = http.StatusText(statusCode)
+	}
+	return &APIError{StatusCode: statusCode, Code: payload.Code, Message: payload.Message}
+}
+
+func newRandomUIN() (string, error) {
+	var data [4]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", fmt.Errorf("generate X-WECHAT-UIN: %w", err)
+	}
+	value := binary.BigEndian.Uint32(data[:])
+	return base64.StdEncoding.EncodeToString([]byte(strconv.FormatUint(uint64(value), 10))), nil
 }
