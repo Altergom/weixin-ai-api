@@ -128,6 +128,18 @@ func (c *Connector) NextMessage(ctx context.Context) (ilink.TextMessage, error) 
 	return c.queue.Next(ctx)
 }
 
+// SendMessage 向当前已绑定的微信用户发送文本回复。
+func (c *Connector) SendMessage(ctx context.Context, peerID, contextToken, text string) error {
+	binding, err := c.store.LoadBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return errors.New("no iLink account is bound")
+	}
+	return c.ilink.SendMessage(ctx, binding.BaseURL, binding.BotToken, peerID, contextToken, text)
+}
+
 // persistStatus 更新可变状态字段，同时保留 token、cursor 和 baseurl。
 // 状态仅用于提示，错误只记录日志而不向上层传播。
 func (c *Connector) persistStatus(binding store.Binding, status store.ConnectionStatus, lastErr string) {

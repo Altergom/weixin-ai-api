@@ -77,3 +77,13 @@ func (g *Gateway) StartConnection(ctx context.Context) error { return g.connecto
 
 // StopConnection 停止 iLink 长轮询。
 func (g *Gateway) StopConnection() { g.connector.Stop() }
+
+// NextMessage 从入站消息队列中读取下一条消息。
+func (g *Gateway) NextMessage(ctx context.Context) (Message, error) {
+	return g.connector.NextMessage(ctx)
+}
+
+// SendMessage 使用已保存的 bot 绑定向微信用户发送文本消息。
+func (g *Gateway) SendMessage(ctx context.Context, peerID, contextToken, text string) error {
+	return g.connector.SendMessage(ctx, peerID, contextToken, text)
+}

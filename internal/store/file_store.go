@@ -72,6 +72,19 @@ func (s *FileStore) LoadBinding() (*Binding, error) {
 	return &binding, nil
 }
 
+// ClearBinding 删除当前 bot 绑定及联系人上下文凭据。
+func (s *FileStore) ClearBinding() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, name := range []string{bindingFileName, contextTokensFileName} {
+		err := os.Remove(filepath.Join(s.root, name))
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
 func writePrivateFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	temp, err := os.CreateTemp(dir, ".tmp-*")

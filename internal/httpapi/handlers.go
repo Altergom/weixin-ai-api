@@ -19,6 +19,7 @@ func (s *Server) registerRoutes() {
 	s.engine.HandleFunc("POST /api/connection/start", s.handleStart)
 	s.engine.HandleFunc("POST /api/connection/stop", s.handleStop)
 	s.engine.HandleFunc("POST /api/connection/reconnect", s.handleReconnect)
+	s.engine.HandleFunc("POST /api/connection/unbind", s.handleUnbind)
 	s.engine.HandleFunc("GET /api/messages/next", s.handleNextMessage)
 }
 
@@ -69,6 +70,15 @@ func (s *Server) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reconnecting"})
+}
+
+func (s *Server) handleUnbind(w http.ResponseWriter, r *http.Request) {
+	s.deps.Coordinator.Stop()
+	if err := s.deps.Store.ClearBinding(); err != nil {
+		s.fail(w, http.StatusInternalServerError, "clear binding failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "unbound"})
 }
 
 func (s *Server) fail(w http.ResponseWriter, code int, message string) {
