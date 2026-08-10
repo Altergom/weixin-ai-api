@@ -48,10 +48,13 @@ func (c *Connector) connectAndPoll(ctx context.Context, binding *store.Binding, 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		c.log.Info("开始轮询微信消息", "cursor_present", binding.Cursor != "")
 		result, err := c.getUpdates(ctx, binding)
 		if err != nil {
+			c.log.Error("微信消息轮询失败", "error", err)
 			return err
 		}
+		c.log.Info("微信消息轮询完成", "message_count", len(result.Messages), "cursor_changed", result.Cursor != binding.Cursor, "long_poll_timeout", result.LongPollTimeout)
 		onProgress()
 		if result.Cursor != binding.Cursor {
 			binding.Cursor = result.Cursor
@@ -73,6 +76,7 @@ func (c *Connector) connectAndPoll(ctx context.Context, binding *store.Binding, 
 // handleMessage 将一条消息交给模型并发送回复。发送失败只记录并跳过，
 // 不让一条异常回复拆掉整个循环。
 func (c *Connector) handleMessage(ctx context.Context, binding store.Binding, message ilink.TextMessage) {
+	c.log.Info("微信消息入队", "peer_id", message.PeerID, "kind", message.Kind, "has_context_token", message.ContextToken != "")
 	if err := c.store.SaveContextToken(binding.AccountID, message.PeerID, message.ContextToken); err != nil {
 		c.log.Warn("save context token failed", "err", err)
 	}

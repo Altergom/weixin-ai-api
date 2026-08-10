@@ -14,7 +14,11 @@ func TestSendMessage(t *testing.T) {
 		}
 		var body struct {
 			Msg struct {
+				FromUserID   string `json:"from_user_id"`
 				ToUserID     string `json:"to_user_id"`
+				ClientID     string `json:"client_id"`
+				MessageType  int    `json:"message_type"`
+				MessageState int    `json:"message_state"`
 				ContextToken string `json:"context_token"`
 				ItemList     []struct {
 					Type     int `json:"type"`
@@ -27,7 +31,7 @@ func TestSendMessage(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if body.Msg.ToUserID != "peer" || body.Msg.ContextToken != "ctx" {
+		if body.Msg.FromUserID != "" || body.Msg.ToUserID != "peer" || body.Msg.ClientID == "" || body.Msg.MessageType != 2 || body.Msg.MessageState != 2 || body.Msg.ContextToken != "ctx" {
 			t.Fatalf("msg = %+v", body.Msg)
 		}
 		if len(body.Msg.ItemList) != 1 || body.Msg.ItemList[0].TextItem.Text != "hi" {

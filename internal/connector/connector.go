@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -136,6 +137,15 @@ func (c *Connector) SendMessage(ctx context.Context, peerID, contextToken, text 
 	}
 	if binding == nil {
 		return errors.New("no iLink account is bound")
+	}
+	if strings.TrimSpace(contextToken) == "" {
+		contextToken, err = c.store.LoadContextToken(binding.AccountID, peerID)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(contextToken) == "" {
+			return errors.New("no context token for peer")
+		}
 	}
 	return c.ilink.SendMessage(ctx, binding.BaseURL, binding.BotToken, peerID, contextToken, text)
 }
