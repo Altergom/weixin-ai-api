@@ -16,6 +16,15 @@ import (
 // Message 是网关输出的统一入站消息类型。
 type Message = protocol.TextMessage
 
+type MediaType = protocol.MediaType
+
+type UploadedMedia = protocol.UploadedMedia
+
+const (
+	MediaTypeImage = protocol.MediaTypeImage
+	MediaTypeVoice = protocol.MediaTypeVoice
+)
+
 // Config 是网关库的非敏感运行配置。
 type Config struct {
 	Host          string
@@ -25,6 +34,7 @@ type Config struct {
 	ILinkAppID    string
 	ClientVersion uint32
 	BotAgent      string
+	CDNBaseURL    string
 }
 
 // Gateway 封装消息队列、iLink 连接器和本地 HTTP Handler。
@@ -59,7 +69,7 @@ func NewGateway(cfg Config, logger *slog.Logger) (*Gateway, error) {
 		return nil, err
 	}
 	queue := connector.NewMessageQueue()
-	coordinator := connector.New(ilinkClient, fileStore, queue, logger)
+	coordinator := connector.NewWithCDN(ilinkClient, fileStore, queue, logger, cfg.CDNBaseURL)
 	server := httpapi.NewServer(app.ServerConfig{Host: cfg.Host, Port: cfg.Port}, logger, httpapi.Deps{
 		Coordinator: coordinator,
 		ILink:       ilinkClient,
@@ -86,4 +96,14 @@ func (g *Gateway) NextMessage(ctx context.Context) (Message, error) {
 // SendMessage 使用已保存的 bot 绑定向微信用户发送文本消息。
 func (g *Gateway) SendMessage(ctx context.Context, peerID, contextToken, text string) error {
 	return g.connector.SendMessage(ctx, peerID, contextToken, text)
+}
+
+// SendImage 上传并发送图片消息。
+func (g *Gateway) SendImage(ctx context.Context, peerID, contextToken, caption string, data []byte) error {
+	return g.connector.SendImage(ctx, peerID, contextToken, caption, data)
+}
+
+// SendVoice 上传并发送语音消息。encodeType=6 表示 SILK，7 表示 MP3。
+func (g *Gateway) SendVoice(ctx context.Context, peerID, contextToken, text string, data []byte, encodeType, playtimeMs int) error {
+	return g.connector.SendVoice(ctx, peerID, contextToken, text, data, encodeType, playtimeMs)
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 )
@@ -95,7 +97,27 @@ func (c *Client) GetUpdates(ctx context.Context, baseURL, token, cursor string) 
 	if response.Code != 0 {
 		return nil, fmt.Errorf("ilink getupdates: errcode %d", response.Code)
 	}
-	return response.result(), nil
+	result := response.result()
+	for i := range result.Messages {
+		media := result.Messages[i].Media
+		if media == nil || strings.TrimSpace(media.FullURL) != "" || strings.TrimSpace(media.EncryptQueryParam) == "" {
+			continue
+		}
+		media.FullURL = buildMediaURL(target, media.EncryptQueryParam)
+	}
+	return result, nil
+}
+
+func buildMediaURL(baseURL *url.URL, encryptedQueryParam string) string {
+	if baseURL == nil {
+		return ""
+	}
+	parsed := *baseURL
+	parsed.Path = path.Join(parsed.Path, "download")
+	query := parsed.Query()
+	query.Set("encrypted_query_param", encryptedQueryParam)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func (r updatesResponse) result() *UpdatesResult {
